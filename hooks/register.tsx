@@ -15,6 +15,7 @@ const brief = atom({ plugin: 'desk', key: 'brief' } as const, '')
 const alert = atom({ plugin: 'desk', key: 'alert' } as const, null)
 const expanded = atom({ plugin: 'desk', key: 'expanded' } as const, [])
 const tabs = atom({ plugin: 'desk', key: 'tabs' } as const, {})
+const tick = atom({ plugin: 'desk', key: 'tick' } as const, 0)
 const hidden = atom({ plugin: 'desk', key: 'hidden' } as const, [])
 const viewing = atom({ plugin: 'desk', key: 'viewing' } as const, null)
 
@@ -37,6 +38,8 @@ let titleAt = 0
 let tabsAt = 0
 let bindAt = 0
 let bindTries = 0
+let lastSig = ''
+let lastTabs = ''
 let me: Session | null = null
 let seen = new Map<string, SessionState>()
 let isFirstScan = true
@@ -44,9 +47,9 @@ let isFirstScan = true
 const waiting = (list: Session[]) => list.filter(s => WAITING.includes(s.state))
 
 const ago = (since: number) => {
-  const s = Math.max(0, Math.round((Date.now() - since) / 1000))
+  const m = Math.floor((Date.now() - since) / 60_000)
 
-  return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`
+  return m < 1 ? '<1m' : m < 60 ? `${m}m` : `${Math.floor(m / 60)}h`
 }
 
 const snippet = (text: string, n = 90) => {
@@ -126,45 +129,60 @@ async function osa($: EngineInterface, lines: string[], args: string[] = []) {
   return $.process.run(['osascript', ...lines.flatMap(l => ['-e', l]), ...args], { timeoutMs: 8000 })
 }
 
-// find this session's Ghostty terminal once: mark its tab, ask Ghostty which terminal has the mark, put the title back
-async function bind($: EngineInterface) {
-  if (me === null || tty === null || me.term) {
-    return
-  }
-  const marker = `desk-bind-${me.id.slice(0, 8)}`
-  await paint($, tty, marker)
-  await $.clock.sleep(350)
-  const ran = await osa($, [`tell application "Ghostty" to get id of first terminal whose name is "${marker}"`])
-  await paint($, tty, tabText(me))
-  const found = ran.exitCode === 0 ? ran.stdout.trim() : ''
-  if (found && me !== null) {
-    me = { ...me, term: found }
-    await save($)
-  }
-}
+type Terminal = { id: string; wd: string; name: string }
 
-// every Ghostty terminal's id and the title it shows now
-async function readTabs($: EngineInterface) {
+// every Ghostty terminal: its id, working directory and the title it shows now
+async function listTerminals($: EngineInterface) {
   const ran = await osa($, [
     'tell application "Ghostty"',
     'set out to ""',
     'repeat with t in terminals',
-    'set out to out & (id of t) & (ASCII character 9) & (name of t) & (ASCII character 10)',
+    'set out to out & (id of t) & (ASCII character 9) & (working directory of t) & (ASCII character 9) & (name of t) & (ASCII character 10)',
     'end repeat',
     'return out',
     'end tell',
   ])
-  const map: Record<string, string> = {}
+  const list: Terminal[] = []
   if (ran.exitCode === 0) {
     for (const line of ran.stdout.split('\n')) {
-      const [tid, ...rest] = line.split('\t')
-      if (tid) {
-        map[tid] = rest.join('\t').trim()
+      const [id = '', wd = '', ...rest] = line.split('\t')
+      if (id) {
+        list.push({ id, wd, name: rest.join('\t').trim() })
       }
     }
   }
 
-  return map
+  return list
+}
+
+// find this session's Ghostty terminal: by folder, then by name, and by a quick marker title if those cannot tell
+async function bind($: EngineInterface) {
+  if (me === null || tty === null || me.term) {
+    return
+  }
+  const dirOf = (path: string) => path.toLowerCase().replace(/\/+$/, '')
+  const here = dirOf(me.cwd)
+  const names = [name(me), me.title].filter(Boolean).map(n => n.toLowerCase())
+  const guess = async () => {
+    const near = (await listTerminals($)).filter(t => dirOf(t.wd) === here)
+    const named = near.filter(t => names.some(n => t.name.toLowerCase().includes(n)))
+
+    return named.length === 1 ? named[0] : near.length === 1 ? near[0] : undefined
+  }
+  let found = await guess()
+  if (found === undefined) {
+    const marker = `desk-bind-${me.id.slice(0, 8)}`
+    for (let i = 0; i < 4 && found === undefined; i += 1) {
+      await paint($, tty, marker)
+      await $.clock.sleep(150)
+      found = (await listTerminals($)).find(t => t.name === marker)
+    }
+    await paint($, tty, tabText(me))
+  }
+  if (found !== undefined && me !== null) {
+    me = { ...me, term: found.id }
+    await save($)
+  }
 }
 
 // focus a session's tab, and with `text` paste it into that prompt without sending; returns an error or ''
@@ -277,8 +295,15 @@ async function scan($: EngineInterface) {
   const id = await $.session.id()
   // a fixed order: when the session began, never its state
   found.sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0) || a.id.localeCompare(b.id))
-  await update($, sessions, () => found)
-  await update($, self, () => id)
+  // a write redraws the pane: write only when something it shows has changed
+  const sig = JSON.stringify(found, (key, value) => (key === 'updatedAt' ? undefined : value))
+  if (sig !== lastSig) {
+    lastSig = sig
+    await update($, sessions, () => found)
+  }
+  if ((await read($, self)) !== id) {
+    await update($, self, () => id)
+  }
 
   const others = found.filter(s => s.id !== id)
   const next = new Map(others.map(s => [s.id, s.state]))
@@ -298,7 +323,7 @@ async function scan($: EngineInterface) {
   $.ui.status(count > 0 ? `desk: ${count} waiting` : undefined)
 
   if (me !== null) {
-    if (!me.term && tty !== null && bindTries < 3 && Date.now() - bindAt > 30_000) {
+    if (!me.term && tty !== null && bindTries < 6 && Date.now() - bindAt > 30_000) {
       bindTries += 1
       bindAt = Date.now()
       void bind($)
@@ -308,8 +333,15 @@ async function scan($: EngineInterface) {
     const isPaneUp = (await $.ui.panes()).some(pane => pane.id === DESK && pane.isPlaced)
     if (isPaneUp && Date.now() - tabsAt > 6000) {
       tabsAt = Date.now()
-      const map = await readTabs($)
-      await update($, tabs, () => map)
+      const map: Record<string, string> = {}
+      for (const t of await listTerminals($)) {
+        map[t.id] = t.name
+      }
+      const mapSig = JSON.stringify(map)
+      if (mapSig !== lastTabs) {
+        lastTabs = mapSig
+        await update($, tabs, () => map)
+      }
     }
   }
 }
@@ -493,6 +525,7 @@ export const register: Register = on => {
     void scan($)
     $.clock.every(HEARTBEAT_MS, () => void save($))
     $.clock.every(SCAN_MS, () => void scan($))
+    $.clock.every(60_000, () => void update($, tick, n => n + 1))
 
     return next(e)
   })
@@ -703,11 +736,12 @@ export const register: Register = on => {
     const gone = await read($, hidden)
     const open = await read($, expanded)
     const seen = await read($, tabs)
+    await read($, tick)
     const columns = e.viewport?.columns ?? 60
     const rows = e.viewport?.rows ?? 30
     const need = waiting(all.filter(s => s.id !== id)).length
     const rule = '─'.repeat(250)
-    const inner = Math.max(30, columns - 14)
+    const inner = Math.max(30, columns - 18)
 
     // every session takes the same rows: a header, a two-line brief, then what it is blocked on and its items
     const block = all.map(s => {
@@ -737,7 +771,9 @@ export const register: Register = on => {
 
           return (
             <Box key={s.id} flexDirection="column">
-              <Text dimColor wrap="truncate">{rule}</Text>
+              <Box height={1} overflow="hidden">
+                <Text dimColor wrap="wrap">{rule}</Text>
+              </Box>
               <Box
                 flexDirection="column"
                 borderStyle={s.id === id ? 'round' : undefined}
