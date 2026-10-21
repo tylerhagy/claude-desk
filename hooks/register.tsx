@@ -752,9 +752,10 @@ export const register: Register = on => {
       const text = s.brief || (s.prompt && !s.prompt.startsWith('<') ? `Asked: ${s.prompt}` : '')
       const lines = Math.max(1, Math.ceil(text.length / inner))
       const extras = (isBlocked ? 1 : 0) + shown.length + (mine.length > 3 ? 1 : 0)
-      const height = 2 + (s.term ? 1 : 0) + lines + extras + (s.id === id ? 2 : 0) + (extras > 0 ? 1 : 0)
+      const differs = Boolean(s.term) && seen[s.term] !== undefined && seen[s.term] !== tabText(s)
+      const height = 2 + (differs ? 1 : 0) + lines + extras + (s.id === id ? 2 : 0) + (extras > 0 ? 1 : 0)
 
-      return { s, mine, isOpen, shown, isBlocked, height }
+      return { s, mine, isOpen, shown, isBlocked, differs, height }
     })
     let used = 2
     const fits = block.filter(b => (used += b.height) <= rows)
@@ -766,7 +767,7 @@ export const register: Register = on => {
           {all.length} sessions · {need} waiting on you
         </Text>
         {all.length === 0 && <Text dimColor>No sessions reporting yet.</Text>}
-        {fits.map(({ s, mine, isOpen, shown, isBlocked }) => {
+        {fits.map(({ s, mine, isOpen, shown, isBlocked, differs }) => {
           const color = s.state === 'permission' || s.state === 'question' ? 'yellow' : s.state === 'done' ? 'green' : undefined
 
           return (
@@ -797,13 +798,9 @@ export const register: Register = on => {
                   )}
                 </Box>
               </Box>
-              {s.term && seen[s.term] !== undefined && (
+              {differs && (
                 <Box paddingLeft={3}>
-                  <Text
-                    dimColor={seen[s.term] === tabText(s)}
-                    color={seen[s.term] === tabText(s) ? undefined : 'yellow'}
-                    wrap="truncate-end"
-                  >
+                  <Text color="yellow" wrap="truncate-end">
                     tab: {seen[s.term]}
                   </Text>
                 </Box>
