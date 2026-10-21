@@ -11,8 +11,7 @@ const STALE_MS = 45_000
 
 const sessions = atom({ plugin: 'desk', key: 'sessions' } as const, [])
 const self = atom({ plugin: 'desk', key: 'self' } as const, '')
-const brief = atom({ plugin: 'desk', key: 'brief' } as const, '')
-const alert = atom({ plugin: 'desk', key: 'alert' } as const, null)
+const note = atom({ plugin: 'desk', key: 'note' } as const, '')
 const expanded = atom({ plugin: 'desk', key: 'expanded' } as const, [])
 const tabs = atom({ plugin: 'desk', key: 'tabs' } as const, {})
 const tick = atom({ plugin: 'desk', key: 'tick' } as const, 0)
@@ -41,8 +40,6 @@ let bindTries = 0
 let lastSig = ''
 let lastTabs = ''
 let me: Session | null = null
-let seen = new Map<string, SessionState>()
-let isFirstScan = true
 
 const waiting = (list: Session[]) => list.filter(s => WAITING.includes(s.state))
 
@@ -216,10 +213,16 @@ async function reach($: EngineInterface, s: Session, text = ''): Promise<string>
   return ran.exitCode === 0 ? '' : snippet(ran.stderr, 100)
 }
 
+// a short message for the pane's top line; the chat never gets one
+async function tell($: EngineInterface, text: string) {
+  await update($, note, () => text)
+  $.clock.after(8_000, () => void update($, note, current => (current === text ? '' : current)))
+}
+
 async function openSession($: EngineInterface, s: Session) {
   const error = await reach($, s)
   if (error) {
-    $.ui.toast(`Could not open ${name(s)}: ${error}`)
+    await tell($, `Could not open ${name(s)}: ${error}`)
   }
 }
 
@@ -305,23 +308,6 @@ async function scan($: EngineInterface) {
     await update($, self, () => id)
   }
 
-  const others = found.filter(s => s.id !== id)
-  const next = new Map(others.map(s => [s.id, s.state]))
-  if (!isFirstScan) {
-    for (const s of others) {
-      if (WAITING.includes(s.state) && seen.get(s.id) !== s.state) {
-        const text = `${name(s)}: ${LABEL[s.state]}${s.detail ? ` · ${snippet(s.detail, 60)}` : ''}`
-        await update($, alert, () => ({ text, state: s.state }))
-        $.clock.after(10_000, () => void update($, alert, current => (current?.text === text ? null : current)))
-      }
-    }
-  }
-  seen = next
-  isFirstScan = false
-
-  const count = waiting(others).length
-  $.ui.status(count > 0 ? `desk: ${count} waiting` : undefined)
-
   if (me !== null) {
     if (!me.term && tty !== null && bindTries < 6 && Date.now() - bindAt > 30_000) {
       bindTries += 1
@@ -404,7 +390,7 @@ async function actOn($: EngineInterface, s: Session, item: Item) {
   }
   const error = await reach($, s, draft)
   if (error) {
-    $.ui.toast(`Could not open ${name(s)}: ${error}`)
+    await tell($, `Could not open ${name(s)}: ${error}`)
 
     return
   }
@@ -456,7 +442,6 @@ async function refreshBrief($: EngineInterface) {
       items = items.slice(0, 6)
     }
     me = { ...me, brief: text, label: threeWords(said) || me.label, items }
-    await update($, brief, () => text)
     await save($)
 
     return text
@@ -509,7 +494,6 @@ export const register: Register = on => {
     try {
       const old = JSON.parse((await $.fs.read(`${dir()}/${id}.json`)) as string) as Session
       me = { ...me, startedAt: old.startedAt || me.startedAt, brief: old.brief ?? '', prompt: old.prompt ?? '', title: old.title ?? '', custom: old.custom ?? '', label: old.label ?? '', items: old.items ?? [], dismissed: old.dismissed ?? [], term: old.term ?? '' }
-      await update($, brief, () => me?.brief ?? '')
     } catch {
       // a new session has no file yet
     }
@@ -522,6 +506,7 @@ export const register: Register = on => {
     await $.command.register({ name: 'tabtitle', description: 'Turn the tab title status (on/off); no argument shows which' })
     await $.command.register({ name: 'desk', description: 'Open the desk: every Claude session and what it is waiting on' })
     await $.command.register({ name: 'view', description: 'View a file or image in a pane (no argument: newest screenshot)' })
+    void $.ui.open({ id: DESK, title: 'Desk' })
     void scan($)
     $.clock.every(HEARTBEAT_MS, () => void save($))
     $.clock.every(SCAN_MS, () => void scan($))
@@ -653,56 +638,6 @@ export const register: Register = on => {
     return { text: opened.isPlaced ? `Viewing ${path}` : 'The pane needs a wider terminal (110 columns).' }
   })
 
-  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const all = await read($, sessions)
-    const id = await read($, self)
-    const mine = await read($, brief)
-    const everyone = all.filter(s => s.id !== id)
-    // the pane says it all: the line about other sessions is for when it is not up
-    const isPaneUp = (await $.ui.panes()).some(pane => pane.id === DESK && pane.isPlaced)
-    const others = isPaneUp ? [] : everyone
-    const heads = await read($, alert)
-    if (e.props.hasSurvey || (others.length === 0 && mine === '' && heads === null)) {
-      return next(e)
-    }
-
-    const { Box, Button, Text } = $.ui.resolve(e)
-    const need = waiting(others).sort((a, b) => ORDER.indexOf(a.state) - ORDER.indexOf(b.state))
-    const urgent = need.some(s => s.state !== 'done')
-    const working = others.filter(s => s.state === 'working').length
-
-    return (
-      <Box flexDirection="column">
-        {heads !== null && (
-          <Text
-            bold
-            color="black"
-            backgroundColor={heads.state === 'done' ? 'green' : 'yellow'}
-          >
-            {' '}{ICON[heads.state]} {heads.text}{' '}
-          </Text>
-        )}
-        {mine !== '' && <Text dimColor>Where we are: {mine}</Text>}
-        {others.length > 0 && (
-          <Box>
-            {need.length === 0 ? (
-              <Text dimColor>Desk: nothing waiting{working > 0 ? ` · ${working} working` : ''} </Text>
-            ) : (
-              <Text color={urgent ? 'yellow' : 'green'} bold>
-                Desk: {need.length} waiting ·{' '}
-                {need
-                  .slice(0, 3)
-                  .map(s => `${snippet(name(s), 30)} ${LABEL[s.state]}`)
-                  .join(' · ')}{' '}
-              </Text>
-            )}
-            <Button key="open" label="Open" onPress={() => void $.ui.open({ id: DESK, title: 'Desk' })} />
-          </Box>
-        )}
-      </Box>
-    )
-  })
-
   on('ui.render', { component: 'Pane', requestId: DESK }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const all = await read($, sessions)
@@ -710,6 +645,7 @@ export const register: Register = on => {
     const gone = await read($, hidden)
     const open = await read($, expanded)
     const seen = await read($, tabs)
+    const said = await read($, note)
     await read($, tick)
     const columns = e.viewport?.columns ?? 60
     const rows = e.viewport?.rows ?? 30
@@ -740,6 +676,7 @@ export const register: Register = on => {
         <Text bold>
           {all.length} sessions · {need} waiting on you
         </Text>
+        {said !== '' && <Text color="yellow">{said}</Text>}
         {all.length === 0 && <Text dimColor>No sessions reporting yet.</Text>}
         {fits.map(({ s, mine, isOpen, shown, isBlocked, differs }) => {
           const color = s.state === 'permission' || s.state === 'question' ? 'yellow' : s.state === 'done' ? 'green' : undefined

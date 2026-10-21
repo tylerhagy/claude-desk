@@ -22,8 +22,6 @@ export type Session = {
   updatedAt: number
 }
 
-export type Alert = { text: string; state: SessionState }
-
 export type Viewing =
   | { kind: 'image'; path: string; file: string; width: number; height: number }
   | { kind: 'markdown'; path: string; text: string }
@@ -32,6 +30,6 @@ export type Viewing =
 
 declare module 'claude-code' {
   interface PluginState {
-    desk: { sessions: Session[]; self: string; brief: string; alert: Alert | null; expanded: string[]; hidden: string[]; tabs: Record<string, string>; tick: number; viewing: Viewing | null }
+    desk: { sessions: Session[]; self: string; note: string; expanded: string[]; hidden: string[]; tabs: Record<string, string>; tick: number; viewing: Viewing | null }
   }
 }
