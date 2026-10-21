@@ -572,32 +572,6 @@ export const register: Register = on => {
     return verdict
   })
 
-  on('classic.PostToolUse', async ($, e, next) => {
-    await setState($, 'working')
-
-    return next(e)
-  })
-
-  on('classic.PermissionDenied', async ($, e, next) => {
-    await setState($, 'working')
-
-    return next(e)
-  })
-
-  on('classic.Notification', async ($, e, next) => {
-    if (e.notification_type === 'elicitation_dialog') {
-      await setState($, 'question', snippet(e.message))
-    }
-
-    return next(e)
-  })
-
-  on('classic.Stop', async ($, e, next) => {
-    await setState($, 'done', snippet(e.last_assistant_message ?? ''))
-
-    return next(e)
-  })
-
   on('turn.complete', async ($, e, next) => {
     if (me !== null && me.state !== 'done') {
       await setState($, 'done')
