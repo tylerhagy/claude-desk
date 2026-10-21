@@ -6,7 +6,7 @@ A Claude Code mod for keeping track of many terminal sessions at once. It shows 
 
 - **Band above the prompt.** A dim `Where we are: …` line for the chat you're in, plus a line about other sessions waiting on you (hidden while the pane is open).
 - **Alert strip.** When another session starts waiting, a yellow (permission or question) or green (finished) strip appears for 10 seconds.
-- **`/desk` pane.** Every session in a fixed order, each with its name, folder, state, a plain-language summary, and what it is blocked on. A **Go To** button focuses that session's Ghostty tab.
+- **`/desk` pane.** Every session in a fixed order, each with its name, folder, state, a plain-language summary, and what it is blocked on. A **Go To** button focuses that session's Ghostty tab, and each section shows that tab's actual title (including one you renamed by hand). The session you are in is outlined.
 - **Open items.** Up to three open questions and action items per session, with expand, remove, and a button that drafts a prompt (not sent) in that session. A question only appears when Claude is genuinely waiting on you.
 - **Tab titles.** A colored circle plus the session's name: a name you set with `/rename`, else a label of three words or fewer for the current work.
 - **`/view <path>`** shows an image, markdown or code file in a pane. With no path it shows your newest Desktop screenshot.

@@ -14,6 +14,7 @@ const self = atom({ plugin: 'desk', key: 'self' } as const, '')
 const brief = atom({ plugin: 'desk', key: 'brief' } as const, '')
 const alert = atom({ plugin: 'desk', key: 'alert' } as const, null)
 const expanded = atom({ plugin: 'desk', key: 'expanded' } as const, [])
+const tabs = atom({ plugin: 'desk', key: 'tabs' } as const, {})
 const hidden = atom({ plugin: 'desk', key: 'hidden' } as const, [])
 const viewing = atom({ plugin: 'desk', key: 'viewing' } as const, null)
 
@@ -33,6 +34,9 @@ let tty: string | null = null
 let isTitled = true
 let isBriefing = false
 let titleAt = 0
+let tabsAt = 0
+let bindAt = 0
+let bindTries = 0
 let me: Session | null = null
 let seen = new Map<string, SessionState>()
 let isFirstScan = true
@@ -118,24 +122,86 @@ async function retitle($: EngineInterface) {
   await paint($, tty, tabText(me))
 }
 
-// Ghostty can focus a terminal by script but not by session: mark the tab, focus it, put its title back
-async function openSession($: EngineInterface, s: Session) {
-  if (!s.tty) {
-    $.ui.toast(`${name(s)}: no terminal known for this session`)
+async function osa($: EngineInterface, lines: string[], args: string[] = []) {
+  return $.process.run(['osascript', ...lines.flatMap(l => ['-e', l]), ...args], { timeoutMs: 8000 })
+}
 
+// find this session's Ghostty terminal once: mark its tab, ask Ghostty which terminal has the mark, put the title back
+async function bind($: EngineInterface) {
+  if (me === null || tty === null || me.term) {
     return
   }
+  const marker = `desk-bind-${me.id.slice(0, 8)}`
+  await paint($, tty, marker)
+  await $.clock.sleep(350)
+  const ran = await osa($, [`tell application "Ghostty" to get id of first terminal whose name is "${marker}"`])
+  await paint($, tty, tabText(me))
+  const found = ran.exitCode === 0 ? ran.stdout.trim() : ''
+  if (found && me !== null) {
+    me = { ...me, term: found }
+    await save($)
+  }
+}
+
+// every Ghostty terminal's id and the title it shows now
+async function readTabs($: EngineInterface) {
+  const ran = await osa($, [
+    'tell application "Ghostty"',
+    'set out to ""',
+    'repeat with t in terminals',
+    'set out to out & (id of t) & (ASCII character 9) & (name of t) & (ASCII character 10)',
+    'end repeat',
+    'return out',
+    'end tell',
+  ])
+  const map: Record<string, string> = {}
+  if (ran.exitCode === 0) {
+    for (const line of ran.stdout.split('\n')) {
+      const [tid, ...rest] = line.split('\t')
+      if (tid) {
+        map[tid] = rest.join('\t').trim()
+      }
+    }
+  }
+
+  return map
+}
+
+// focus a session's tab, and with `text` paste it into that prompt without sending; returns an error or ''
+async function reach($: EngineInterface, s: Session, text = ''): Promise<string> {
+  const paste = text ? ['input text (item 2 of argv) to t'] : []
+  const script = (by: string) => [
+    'on run argv',
+    'tell application "Ghostty"',
+    `set t to first terminal whose ${by} is (item 1 of argv)`,
+    'focus t',
+    ...paste,
+    'end tell',
+    'end run',
+  ]
+  const flat = text.replace(/\s+/g, ' ')
+  if (s.term) {
+    const ran = await osa($, script('id'), [s.term, flat])
+
+    return ran.exitCode === 0 ? '' : snippet(ran.stderr, 100)
+  }
+  if (!s.tty) {
+    return 'no terminal known for this session'
+  }
+  // not bound yet: mark the tab, focus it by the mark, put its title back
   const marker = `desk-focus-${s.id.slice(0, 8)}`
   await paint($, s.tty, marker)
   await $.clock.sleep(400)
-  const ran = await $.process.run([
-    'osascript',
-    '-e',
-    `tell application "Ghostty" to focus (first terminal whose name is "${marker}")`,
-  ])
+  const ran = await osa($, script('name'), [marker, flat])
   await paint($, s.tty, tabText(s))
-  if (ran.exitCode !== 0) {
-    $.ui.toast(`Could not open ${name(s)}: ${snippet(ran.stderr, 100)}`)
+
+  return ran.exitCode === 0 ? '' : snippet(ran.stderr, 100)
+}
+
+async function openSession($: EngineInterface, s: Session) {
+  const error = await reach($, s)
+  if (error) {
+    $.ui.toast(`Could not open ${name(s)}: ${error}`)
   }
 }
 
@@ -230,6 +296,22 @@ async function scan($: EngineInterface) {
 
   const count = waiting(others).length
   $.ui.status(count > 0 ? `desk: ${count} waiting` : undefined)
+
+  if (me !== null) {
+    if (!me.term && tty !== null && bindTries < 3 && Date.now() - bindAt > 30_000) {
+      bindTries += 1
+      bindAt = Date.now()
+      void bind($)
+    }
+    // Claude can write the title between our updates: write it again so the tab keeps up with the pane
+    await retitle($)
+    const isPaneUp = (await $.ui.panes()).some(pane => pane.id === DESK && pane.isPlaced)
+    if (isPaneUp && Date.now() - tabsAt > 6000) {
+      tabsAt = Date.now()
+      const map = await readTabs($)
+      await update($, tabs, () => map)
+    }
+  }
 }
 
 const BRIEF_PROMPT =
@@ -288,29 +370,9 @@ async function actOn($: EngineInterface, s: Session, item: Item) {
 
     return
   }
-  if (!s.tty) {
-    $.ui.toast(`${name(s)}: no terminal known for this session`)
-
-    return
-  }
-  const marker = `desk-focus-${s.id.slice(0, 8)}`
-  await paint($, s.tty, marker)
-  await $.clock.sleep(400)
-  const ran = await $.process.run([
-    'osascript',
-    '-e', 'on run argv',
-    '-e', 'tell application "Ghostty"',
-    '-e', 'set t to first terminal whose name is (item 1 of argv)',
-    '-e', 'focus t',
-    '-e', 'input text (item 2 of argv) to t',
-    '-e', 'end tell',
-    '-e', 'end run',
-    marker,
-    draft.replace(/\s+/g, ' '),
-  ])
-  await paint($, s.tty, tabText(s))
-  if (ran.exitCode !== 0) {
-    $.ui.toast(`Could not open ${name(s)}: ${snippet(ran.stderr, 100)}`)
+  const error = await reach($, s, draft)
+  if (error) {
+    $.ui.toast(`Could not open ${name(s)}: ${error}`)
 
     return
   }
@@ -401,6 +463,7 @@ export const register: Register = on => {
       custom: '',
       label: '',
       tty: '',
+      term: '',
       cwd,
       state: 'idle',
       detail: '',
@@ -413,7 +476,7 @@ export const register: Register = on => {
     }
     try {
       const old = JSON.parse((await $.fs.read(`${dir()}/${id}.json`)) as string) as Session
-      me = { ...me, startedAt: old.startedAt || me.startedAt, brief: old.brief ?? '', prompt: old.prompt ?? '', title: old.title ?? '', custom: old.custom ?? '', label: old.label ?? '', items: old.items ?? [], dismissed: old.dismissed ?? [] }
+      me = { ...me, startedAt: old.startedAt || me.startedAt, brief: old.brief ?? '', prompt: old.prompt ?? '', title: old.title ?? '', custom: old.custom ?? '', label: old.label ?? '', items: old.items ?? [], dismissed: old.dismissed ?? [], term: old.term ?? '' }
       await update($, brief, () => me?.brief ?? '')
     } catch {
       // a new session has no file yet
@@ -422,6 +485,7 @@ export const register: Register = on => {
     tty = found && found !== '??' ? found : null
     me = { ...me, tty: tty ?? '' }
     await save($)
+    void bind($)
     await $.command.register({ name: 'whereami', description: 'Refresh the one-line summary of where this session stands' })
     await $.command.register({ name: 'tabtitle', description: 'Turn the tab title status (on/off); no argument shows which' })
     await $.command.register({ name: 'desk', description: 'Open the desk: every Claude session and what it is waiting on' })
@@ -638,6 +702,7 @@ export const register: Register = on => {
     const id = await read($, self)
     const gone = await read($, hidden)
     const open = await read($, expanded)
+    const seen = await read($, tabs)
     const columns = e.viewport?.columns ?? 60
     const rows = e.viewport?.rows ?? 30
     const need = waiting(all.filter(s => s.id !== id)).length
@@ -653,7 +718,7 @@ export const register: Register = on => {
       const text = s.brief || (s.prompt && !s.prompt.startsWith('<') ? `Asked: ${s.prompt}` : '')
       const lines = Math.max(1, Math.ceil(text.length / inner))
       const extras = (isBlocked ? 1 : 0) + shown.length + (mine.length > 3 ? 1 : 0)
-      const height = 2 + lines + extras + (extras > 0 ? 1 : 0)
+      const height = 2 + (s.term ? 1 : 0) + lines + extras + (s.id === id ? 2 : 0) + (extras > 0 ? 1 : 0)
 
       return { s, mine, isOpen, shown, isBlocked, height }
     })
@@ -673,6 +738,12 @@ export const register: Register = on => {
           return (
             <Box key={s.id} flexDirection="column">
               <Text dimColor wrap="truncate">{rule}</Text>
+              <Box
+                flexDirection="column"
+                borderStyle={s.id === id ? 'round' : undefined}
+                borderColor={s.id === id ? 'cyan' : undefined}
+                paddingX={s.id === id ? 0 : 1}
+              >
               <Box justifyContent="space-between">
                 <Box flexGrow={1} flexShrink={1}>
                   <Text bold color={color} wrap="truncate-end">
@@ -684,12 +755,23 @@ export const register: Register = on => {
                     {s.project} · {s.state === 'idle' ? '' : `${LABEL[s.state]} · `}{ago(s.since)}{'  '}
                   </Text>
                   {s.id === id ? (
-                    <Text dimColor>here</Text>
+                    <Text bold color="cyan">you are here</Text>
                   ) : (
                     <Button key={`go-${s.id}`} label="Go To" onPress={() => void openSession($, s)} />
                   )}
                 </Box>
               </Box>
+              {s.term && seen[s.term] !== undefined && (
+                <Box paddingLeft={3}>
+                  <Text
+                    dimColor={seen[s.term] === tabText(s)}
+                    color={seen[s.term] === tabText(s) ? undefined : 'yellow'}
+                    wrap="truncate-end"
+                  >
+                    tab: {seen[s.term]}
+                  </Text>
+                </Box>
+              )}
               <Box paddingLeft={3}>
                 {s.brief || (s.prompt && !s.prompt.startsWith('<')) ? (
                   <Text wrap="wrap">{s.brief || `Asked: ${s.prompt}`}</Text>
@@ -729,6 +811,7 @@ export const register: Register = on => {
                   />
                 </Box>
               )}
+              </Box>
             </Box>
           )
         })}

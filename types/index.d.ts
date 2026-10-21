@@ -10,6 +10,7 @@ export type Session = {
   custom: string
   label: string
   tty: string
+  term: string
   cwd: string
   state: SessionState
   detail: string
@@ -31,6 +32,6 @@ export type Viewing =
 
 declare module 'claude-code' {
   interface PluginState {
-    desk: { sessions: Session[]; self: string; brief: string; alert: Alert | null; expanded: string[]; hidden: string[]; viewing: Viewing | null }
+    desk: { sessions: Session[]; self: string; brief: string; alert: Alert | null; expanded: string[]; hidden: string[]; tabs: Record<string, string>; viewing: Viewing | null }
   }
 }
