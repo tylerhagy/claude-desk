@@ -1,0 +1,9 @@
+{
+  "name": "desk",
+  "version": "0.1.0",
+  "description": "Awareness across your Claude Code terminal sessions: what needs you, where each one stands, and a pane to jump between them",
+  "author": { "name": "tylerhagy" },
+  "license": "MIT",
+  "repository": "https://github.com/tylerhagy/claude-desk",
+  "types": "./types/index.d.ts"
+}
