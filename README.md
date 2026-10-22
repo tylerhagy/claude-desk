@@ -30,6 +30,10 @@ Sessions only report in once the mod is loaded in them, so restart open terminal
 
 Each session writes a small status file to `~/.claude/desk/sessions/` and refreshes it every 15 seconds. Every session reads that folder to draw the band and pane. The summary, label and open items come from one small-model call (Haiku) over the recent conversation after each finished turn, made through your own session. Nothing leaves your machine except that call.
 
+## Usage
+
+The only thing that uses Claude usage is the summary: one small-model (Haiku) call after a finished turn, at most one per session every 20 seconds, sent only the messages added since the last summary plus the previous summary. A running tally of calls and tokens is kept in `~/.claude/desk/usage.json`.
+
 ## Status
 
 An early version. The summary and open-item capture are model judgments and will be wrong sometimes.

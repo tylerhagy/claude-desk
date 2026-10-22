@@ -39,6 +39,9 @@ let bindAt = 0
 let bindTries = 0
 let lastSig = ''
 let lastTabs = ''
+let seenCount = -1
+let briefAt = 0
+let briefPending = false
 let me: Session | null = null
 
 const waiting = (list: Session[]) => list.filter(s => WAITING.includes(s.state))
@@ -398,6 +401,32 @@ async function actOn($: EngineInterface, s: Session, item: Item) {
 }
 
 // one small-model call over the recent conversation; the answer is the session's brief
+// a running tally of what the summaries cost, kept in one small file
+async function meter($: EngineInterface, input: number, output: number) {
+  const path = `${home}/.claude/desk/usage.json`
+  let total = { calls: 0, input: 0, output: 0 }
+  try {
+    total = JSON.parse((await $.fs.read(path)) as string) as typeof total
+  } catch {
+    // the first call starts the tally
+  }
+  await $.fs.write(path, JSON.stringify({ calls: total.calls + 1, input: total.input + input, output: total.output + output, since: Date.now() }))
+}
+
+// at most one summary every 20 seconds per session; a turn inside that gap is picked up when it ends
+function scheduleBrief($: EngineInterface) {
+  const wait = 20_000 - (Date.now() - briefAt)
+  if (wait <= 0) {
+    void refreshBrief($)
+  } else if (!briefPending) {
+    briefPending = true
+    $.clock.after(wait, () => {
+      briefPending = false
+      scheduleBrief($)
+    })
+  }
+}
+
 async function refreshBrief($: EngineInterface) {
   if (me === null || isBriefing) {
     return ''
@@ -405,8 +434,10 @@ async function refreshBrief($: EngineInterface) {
   isBriefing = true
   try {
     const messages = await $.session.messages()
+    // only what is new since the last summary, which already carries the rest; a clear or compaction starts over
+    const from = seenCount >= 0 && seenCount <= messages.length ? Math.max(seenCount, messages.length - 14) : messages.length - 14
     const recent = messages
-      .slice(-14)
+      .slice(Math.max(0, from))
       .map(m => `${m.role}: ${snippet(String(m.text ?? ''), 500)}`)
       .join('\n')
     if (recent === '') {
@@ -416,11 +447,14 @@ async function refreshBrief($: EngineInterface) {
     const reply = await $.model.complete({
       model: 'haiku',
       prompt: `${BRIEF_PROMPT}\n\n${previous}${recent}`,
-      maxTokens: 160,
+      maxTokens: 220,
     })
     if (!reply.isAnswered) {
       return ''
     }
+    seenCount = messages.length
+    briefAt = Date.now()
+    await meter($, reply.usage.input_tokens, reply.usage.output_tokens)
     const raw = reply.text
     const at = raw.search(/^ITEMS:/im)
     const head = at >= 0 ? raw.slice(0, at) : raw
@@ -569,6 +603,7 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'whereami' }, async $ => {
+    seenCount = -1
     const text = await refreshBrief($)
 
     return { text: text || 'No brief yet: nothing to summarize, or the model did not answer.' }
