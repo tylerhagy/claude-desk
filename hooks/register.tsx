@@ -11,6 +11,7 @@ const STALE_MS = 45_000
 
 const sessions = atom({ plugin: 'desk', key: 'sessions' } as const, [])
 const self = atom({ plugin: 'desk', key: 'self' } as const, '')
+const only = atom({ plugin: 'desk', key: 'only' } as const, false)
 const note = atom({ plugin: 'desk', key: 'note' } as const, '')
 const expanded = atom({ plugin: 'desk', key: 'expanded' } as const, [])
 const tabs = atom({ plugin: 'desk', key: 'tabs' } as const, {})
@@ -681,6 +682,7 @@ export const register: Register = on => {
     const open = await read($, expanded)
     const seen = await read($, tabs)
     const said = await read($, note)
+    const justThis = await read($, only)
     await read($, tick)
     const columns = e.viewport?.columns ?? 60
     const rows = e.viewport?.rows ?? 30
@@ -689,14 +691,15 @@ export const register: Register = on => {
     const inner = Math.max(30, columns - 18)
 
     // every session takes the same rows: a header, a two-line brief, then what it is blocked on and its items
-    const block = all.map(s => {
+    const shownSessions = justThis ? all.filter(s => s.id === id) : all
+    const block = shownSessions.map(s => {
       const mine = (s.items ?? []).filter(i => !gone.includes(i.id))
-      const isOpen = open.includes(s.id)
+      const isOpen = justThis || open.includes(s.id)
       const shown = isOpen ? mine : mine.slice(0, 3)
       const isBlocked = (s.state === 'permission' || s.state === 'question') && Boolean(s.detail)
       const text = s.brief || (s.prompt && !s.prompt.startsWith('<') ? `Asked: ${s.prompt}` : '')
       const lines = Math.max(1, Math.ceil(text.length / inner))
-      const extras = (isBlocked ? 1 : 0) + shown.length + (mine.length > 3 ? 1 : 0)
+      const extras = (isBlocked ? 1 : 0) + shown.length + (mine.length > 3 && !justThis ? 1 : 0)
       const differs = Boolean(s.term) && seen[s.term] !== undefined && seen[s.term] !== tabText(s)
       const height = 2 + (differs ? 1 : 0) + lines + extras + (s.id === id ? 2 : 0) + (extras > 0 ? 1 : 0)
 
@@ -708,11 +711,18 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
-        <Text bold>
-          {all.length} sessions · {need} waiting on you
-        </Text>
+        <Box justifyContent="space-between">
+          <Text bold>
+            {justThis ? 'This chat' : `${all.length} sessions · ${need} waiting on you`}
+          </Text>
+          <Button
+            key="only"
+            label={justThis ? 'All sessions' : 'This chat only'}
+            onPress={() => void update($, only, value => !value)}
+          />
+        </Box>
         {said !== '' && <Text color="yellow">{said}</Text>}
-        {all.length === 0 && <Text dimColor>No sessions reporting yet.</Text>}
+        {shownSessions.length === 0 && <Text dimColor>{justThis ? 'This chat has not reported yet.' : 'No sessions reporting yet.'}</Text>}
         {fits.map(({ s, mine, isOpen, shown, isBlocked, differs }) => {
           const color = s.state === 'permission' || s.state === 'question' ? 'yellow' : s.state === 'done' ? 'green' : undefined
 
@@ -777,7 +787,7 @@ export const register: Register = on => {
                   </Box>
                 </Box>
               ))}
-              {mine.length > 3 && (
+              {mine.length > 3 && !justThis && (
                 <Box paddingLeft={3}>
                   <Button
                     key={`more-${s.id}`}

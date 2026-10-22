@@ -30,6 +30,6 @@ export type Viewing =
 
 declare module 'claude-code' {
   interface PluginState {
-    desk: { sessions: Session[]; self: string; note: string; expanded: string[]; hidden: string[]; tabs: Record<string, string>; tick: number; viewing: Viewing | null }
+    desk: { sessions: Session[]; self: string; note: string; only: boolean; expanded: string[]; hidden: string[]; tabs: Record<string, string>; tick: number; viewing: Viewing | null }
   }
 }
