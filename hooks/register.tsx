@@ -32,7 +32,6 @@ const LABEL: Record<SessionState, string> = {
 
 let home = ''
 let tty: string | null = null
-let isTitled = true
 let isBriefing = false
 let titleAt = 0
 let tabsAt = 0
@@ -61,22 +60,7 @@ const snippet = (text: string, n = 90) => {
 
 const dir = () => `${home}/.claude/desk/sessions`
 
-const ICON: Record<SessionState, string> = {
-  permission: '🔴',
-  question: '🟠',
-  done: '🟢',
-  working: '⏳',
-  idle: '⚪',
-}
-
-// a tab title is an OSC 2 sequence written to a terminal's own device
-async function paint($: EngineInterface, device: string, text: string) {
-  await $.process.run(['sh', '-c', 'printf "\\033]2;%s\\007" "$1" > "/dev/$2"', '_', text, device])
-}
-
 const name = (s: Session) => s.custom || s.label || s.title || s.project
-
-const tabText = (s: Session) => `${ICON[s.state]} ${snippet(name(s), 40)}`
 
 const threeWords = (text: string) =>
   text
@@ -119,13 +103,6 @@ async function refreshTitle($: EngineInterface) {
   me = { ...me, custom, title: generated || me.title }
 }
 
-async function retitle($: EngineInterface) {
-  if (me === null || tty === null || !isTitled) {
-    return
-  }
-  await paint($, tty, tabText(me))
-}
-
 async function osa($: EngineInterface, lines: string[], args: string[] = []) {
   return $.process.run(['osascript', ...lines.flatMap(l => ['-e', l]), ...args], { timeoutMs: 8000 })
 }
@@ -156,7 +133,7 @@ async function listTerminals($: EngineInterface) {
   return list
 }
 
-// find this session's Ghostty terminal: by folder, then by name, and by a quick marker title if those cannot tell
+// find this session's Ghostty terminal: by folder, then or by name; if those cannot tell, it stays unbound and nothing is written to the tab
 async function bind($: EngineInterface) {
   if (me === null || tty === null || me.term) {
     return
@@ -170,16 +147,7 @@ async function bind($: EngineInterface) {
 
     return named.length === 1 ? named[0] : near.length === 1 ? near[0] : undefined
   }
-  let found = await guess()
-  if (found === undefined) {
-    const marker = `desk-bind-${me.id.slice(0, 8)}`
-    for (let i = 0; i < 4 && found === undefined; i += 1) {
-      await paint($, tty, marker)
-      await $.clock.sleep(150)
-      found = (await listTerminals($)).find(t => t.name === marker)
-    }
-    await paint($, tty, tabText(me))
-  }
+  const found = await guess()
   if (found !== undefined && me !== null) {
     me = { ...me, term: found.id }
     await save($)
@@ -204,17 +172,8 @@ async function reach($: EngineInterface, s: Session, text = ''): Promise<string>
 
     return ran.exitCode === 0 ? '' : snippet(ran.stderr, 100)
   }
-  if (!s.tty) {
-    return 'no terminal known for this session'
-  }
-  // not bound yet: mark the tab, focus it by the mark, put its title back
-  const marker = `desk-focus-${s.id.slice(0, 8)}`
-  await paint($, s.tty, marker)
-  await $.clock.sleep(400)
-  const ran = await osa($, script('name'), [marker, flat])
-  await paint($, s.tty, tabText(s))
 
-  return ran.exitCode === 0 ? '' : snippet(ran.stderr, 100)
+  return 'this tab is not matched yet'
 }
 
 // a short message for the pane's top line; the chat never gets one
@@ -237,7 +196,6 @@ async function save($: EngineInterface) {
   me = { ...me, updatedAt: Date.now() }
   await refreshTitle($)
   await $.fs.write(`${dir()}/${me.id}.json`, JSON.stringify(me))
-  await retitle($)
 }
 
 async function setState($: EngineInterface, state: SessionState, detail = '', prompt?: string) {
@@ -318,9 +276,7 @@ async function scan($: EngineInterface) {
       bindAt = Date.now()
       void bind($)
     }
-    // Claude can write the title between our updates: write it again so the tab keeps up with the pane
-    await retitle($)
-    const isPaneUp = (await $.ui.panes()).some(pane => pane.id === DESK && pane.isPlaced)
+      const isPaneUp = (await $.ui.panes()).some(pane => pane.id === DESK && pane.isPlaced)
     if (isPaneUp && Date.now() - tabsAt > 6000) {
       tabsAt = Date.now()
       const map: Record<string, string> = {}
@@ -538,7 +494,6 @@ export const register: Register = on => {
     await save($)
     void bind($)
     await $.command.register({ name: 'whereami', description: 'Refresh the one-line summary of where this session stands' })
-    await $.command.register({ name: 'tabtitle', description: 'Turn the tab title status (on/off); no argument shows which' })
     await $.command.register({ name: 'desk', description: 'Open the desk: every Claude session and what it is waiting on' })
     await $.command.register({ name: 'view', description: 'View a file or image in a pane (no argument: newest screenshot)' })
     void $.ui.open({ id: DESK, title: 'Desk' })
@@ -608,16 +563,6 @@ export const register: Register = on => {
     const text = await refreshBrief($)
 
     return { text: text || 'No brief yet: nothing to summarize, or the model did not answer.' }
-  })
-
-  on('command.run', { command: 'tabtitle' }, async ($, e) => {
-    const arg = e.args.trim()
-    if (arg === 'on' || arg === 'off') {
-      isTitled = arg === 'on'
-      await retitle($)
-    }
-
-    return { text: `Tab title: ${isTitled ? 'on' : 'off'} (terminal ${tty ?? 'not found'}).` }
   })
 
   on('command.run', { command: 'desk' }, async $ => {
@@ -700,10 +645,9 @@ export const register: Register = on => {
       const text = s.brief || (s.prompt && !s.prompt.startsWith('<') ? `Asked: ${s.prompt}` : '')
       const lines = Math.max(1, Math.ceil(text.length / inner))
       const extras = (isBlocked ? 1 : 0) + shown.length + (mine.length > 3 && !justThis ? 1 : 0)
-      const differs = Boolean(s.term) && seen[s.term] !== undefined && seen[s.term] !== tabText(s)
-      const height = 2 + (differs ? 1 : 0) + lines + extras + (s.id === id ? 2 : 0) + (extras > 0 ? 1 : 0)
+      const height = 2 + lines + extras + (s.id === id ? 2 : 0) + (extras > 0 ? 1 : 0)
 
-      return { s, mine, isOpen, shown, isBlocked, differs, height }
+      return { s, mine, isOpen, shown, isBlocked, height }
     })
     let used = 2
     const fits = block.filter(b => (used += b.height) <= rows)
@@ -723,7 +667,7 @@ export const register: Register = on => {
         </Box>
         {said !== '' && <Text color="yellow">{said}</Text>}
         {shownSessions.length === 0 && <Text dimColor>{justThis ? 'This chat has not reported yet.' : 'No sessions reporting yet.'}</Text>}
-        {fits.map(({ s, mine, isOpen, shown, isBlocked, differs }) => {
+        {fits.map(({ s, mine, isOpen, shown, isBlocked }) => {
           const color = s.state === 'permission' || s.state === 'question' ? 'yellow' : s.state === 'done' ? 'green' : undefined
 
           return (
@@ -740,7 +684,7 @@ export const register: Register = on => {
               <Box justifyContent="space-between">
                 <Box flexGrow={1} flexShrink={1}>
                   <Text bold color={color} wrap="truncate-end">
-                    {ICON[s.state]} {name(s)}
+                    {(s.term && seen[s.term]) || name(s)}
                   </Text>
                 </Box>
                 <Box flexShrink={0} paddingLeft={2}>
@@ -754,13 +698,6 @@ export const register: Register = on => {
                   )}
                 </Box>
               </Box>
-              {differs && (
-                <Box paddingLeft={3}>
-                  <Text color="yellow" wrap="truncate-end">
-                    tab: {seen[s.term]}
-                  </Text>
-                </Box>
-              )}
               <Box paddingLeft={3}>
                 {s.brief || (s.prompt && !s.prompt.startsWith('<')) ? (
                   <Text wrap="wrap">{s.brief || `Asked: ${s.prompt}`}</Text>
